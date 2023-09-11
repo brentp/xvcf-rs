@@ -1,0 +1,11 @@
+[package]
+name = "xvcf-rs"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+flate2 = "1.0.26"
+noodles = {version = "0.47.0", features=['vcf', 'bcf', 'csi', 'tabix', 'bgzf', 'core']}
+noodles-util = {version = "0.19.1", features=['variant']}
