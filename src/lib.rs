@@ -1,14 +1,14 @@
 pub use noodles::bcf;
-use noodles::bgzf;
 use noodles::core::{Position, Region};
 pub use noodles::csi;
+use noodles::vcf::record::Chromosome;
 pub use noodles::vcf::{self};
 
 pub use noodles_util::variant;
 
 pub mod detect;
 use detect::{Compression, Format};
-use std::io::{self, Read, Seek};
+use std::io::{self, Seek};
 use std::io::{BufRead, BufReader};
 
 pub enum XCF<R> {
@@ -93,63 +93,77 @@ where
     }
 }
 
+#[inline]
+fn chrom_equals(c: &Chromosome, name: &str) -> bool {
+    match c {
+        Chromosome::Name(n) => n == name,
+        Chromosome::Symbol(_) => false,
+    }
+}
+
+fn advance_reader<R>(r: &mut Reader<R>, header: &vcf::Header, region: &Region) -> io::Result<()>
+where
+    R: BufRead,
+{
+    let one = Position::try_from(1).unwrap();
+    let start =
+        vcf::record::Position::try_from(usize::from(region.interval().start().unwrap_or(one)))
+            .unwrap();
+    let mut v = vcf::Record::default();
+    r.variant = None;
+    loop {
+        let result = match &mut r.inner {
+            XCF::Vcf(reader) => reader.read_record(header, &mut v),
+            XCF::Bcf(reader) => reader.read_record(header, &mut v),
+            _ => unimplemented!(),
+        };
+        match result {
+            Ok(0) => return Ok(()),
+            Ok(_) => {
+                if chrom_equals(v.chromosome(), region.name()) && v.position() >= start {
+                    r.variant = Some(v);
+                    return Ok(());
+                }
+            }
+            Err(e) => return Err(e),
+        };
+    }
+}
+
 impl<R> Reader<R>
 where
     R: BufRead + Seek,
 {
-    // query simply sets the file pointer to the start of region.
-    pub fn query(&mut self, header: &vcf::Header, region: &Region) -> io::Result<()> {
-        let p = usize::from(
-            region
-                .interval()
-                .start()
-                .unwrap_or(Position::try_from(1).unwrap()),
-        );
-        loop {
-            let mut record = vcf::Record::default();
-            self.read_record(header, &mut record)?;
-            let var_end = usize::from(
-                record
-                    .end()
-                    .unwrap_or(vcf::record::Position::try_from(usize::MAX).unwrap()),
-            );
-            if var_end >= p {
-                self.variant = Some(record);
-                break;
-            }
-        }
-
-        let tid = header
-            .contigs()
-            .get(region.name())
-            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "invalid contig"))?;
-        let tid = tid.idx().ok_or(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "invalid contig",
-        ))?;
-
-        let index = self.index.as_ref().ok_or_else(|| {
-            io::Error::new(io::ErrorKind::InvalidInput, "index required for query")
-        })?;
-        let chunks = index
-            .query(tid, region.interval())
-            .or_else(|_| Err(io::Error::new(io::ErrorKind::InvalidInput, "invalid query")))?;
-        let mut buf = Vec::new();
-        let chunk = chunks.iter().next().ok_or_else(|| {
-            io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "invalid query: no chunks found",
-            )
-        })?;
-        let index = self.index.unwrap();
-
+    // skip_to simply sets the file pointer to the start of region.
+    // internally, it consumes the first variant, but that will be returned on the
+    // first call to read_record.
+    pub fn skip_to(&mut self, header: &vcf::Header, region: &Region) -> io::Result<()> {
         match &mut self.inner {
-            XCF::Vcf(reader) => reader.seek(chunk.start())?,
-            XCF::Bcf(reader) => reader.seek(chunk.start())?,
-            XCF::IndexedVcf(reader) => reader.seek(chunk.start())?,
-            XCF::IndexedBcf(reader) => reader.seek(chunk.start())?,
+            XCF::Vcf(_) => advance_reader(self, header, region),
+            XCF::Bcf(_) => advance_reader(self, header, region),
+            XCF::IndexedVcf(reader) => match reader.query(header, region) {
+                Ok(mut r) => {
+                    self.variant = match r.next() {
+                        Some(Ok(v)) => Some(v),
+                        Some(Err(e)) => return Err(e),
+                        None => None,
+                    };
+                    Ok(())
+                }
+                Err(e) => Err(e),
+            },
+            XCF::IndexedBcf(reader) => match reader.query(header, region) {
+                Ok(mut r) => {
+                    self.variant = match r.next() {
+                        Some(Ok(v)) => Some(v),
+                        Some(Err(e)) => return Err(e),
+                        None => None,
+                    };
+                    Ok(())
+                }
+                Err(e) => Err(e),
+            },
         }
-        Ok(())
     }
 }
 
@@ -173,10 +187,32 @@ fn find_index(path: Option<String>) -> Option<csi::Index> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Cursor;
 
     #[test]
-    fn it_works() {
-        let result = 2 + 2;
-        assert_eq!(result, 4);
+    fn test_read_vcf() {
+        let vcf_data = b"\
+            ##fileformat=VCFv4.2\n\
+            #CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\n\
+            chr1\t1000\t.\tA\tC\t.\t.\t.\n\
+            chr1\t2000\t.\tG\tT\t.\t.\t.\n\
+            chr2\t3000\t.\tC\tG\t.\t.\t.\n\
+        ";
+        let cursor = Cursor::new(vcf_data);
+        let mut reader = Reader::from_reader(cursor, None).expect("error creating new reader");
+        let header = reader.header().clone();
+
+        let start = Position::try_from(2000).expect("error creating start");
+        let stop = Position::try_from(2100).expect("error creating stop");
+        let region = Region::new("chr1", start..=stop);
+        reader.skip_to(&header, &region).unwrap();
+
+        let mut v = vcf::Record::default();
+        while let Ok(_) = reader.read_record(&header, &mut v) {
+            eprintln!("v: {:?}", v);
+            assert!(chrom_equals(v.chromosome(), "chr1"));
+            assert_eq!(v.position(), start);
+            break;
+        }
     }
 }
