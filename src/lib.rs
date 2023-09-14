@@ -1,10 +1,9 @@
 pub use noodles::bcf;
 use noodles::bgzf;
-use noodles::core::{Position, Region};
 pub use noodles::csi;
 use noodles::vcf::record::Chromosome;
-use noodles::vcf::IndexedReader;
 pub use noodles::vcf::{self};
+use noodles::vcf::{IndexedReader, VariantReader};
 
 pub use noodles_util::variant;
 
@@ -15,23 +14,24 @@ use std::io::{BufRead, BufReader};
 
 trait BufReadSeek: BufRead + Seek {}
 
-pub enum XCF {
-    Vcf(vcf::Reader<BufReader<Box<dyn BufRead>>>),
-    Bcf(bcf::Reader<BufReader<Box<dyn BufRead>>>),
-    IndexedVcf(vcf::indexed_reader::IndexedReader<bgzf::Reader<BufReader<Box<dyn BufReadSeek>>>>),
-    IndexedBcf(bcf::indexed_reader::IndexedReader<bgzf::Reader<BufReader<Box<dyn BufReadSeek>>>>),
-    CompressedBcf(bcf::Reader<bgzf::Reader<BufReader<Box<dyn BufRead>>>>),
-    CompressedVcf(vcf::Reader<bgzf::Reader<BufReader<Box<dyn BufRead>>>>),
+pub enum XCF<R> {
+    Vcf(Box<dyn VariantReader<R>>),
+    IndexedVcf(vcf::IndexedReader<bgzf::Reader<R>>),
+    IndexedBcf(bcf::IndexedReader<bgzf::Reader<R>>),
 }
 
-pub struct Reader {
-    inner: XCF,
+pub struct Reader<R> {
+    inner: XCF<R>,
     header: vcf::Header,
     variant: Option<vcf::Record>,
 }
 
-impl Reader {
-    pub fn new(inner: XCF, header: vcf::Header) -> Self {
+impl<R> Reader<R>
+where
+    R: BufRead,
+    vcf::Reader<BufReader<Box<dyn BufRead>>>: VariantReader<R>,
+{
+    pub fn new(inner: XCF<R>, header: vcf::Header) -> Self {
         Self {
             inner,
             header,
@@ -39,47 +39,25 @@ impl Reader {
         }
     }
 
-    pub fn from_reader(reader: Box<dyn BufRead>, path: Option<String>) -> io::Result<Reader> {
+    pub fn from_reader(reader: Box<dyn BufRead>, path: Option<String>) -> io::Result<Reader<R>> {
         let mut reader = BufReader::new(reader);
         let compression = detect::detect_compression(&mut reader)?;
         let format = detect::detect_format(&mut reader, compression)?;
         let csi = find_index(path);
 
-        let mut rdr = match (format, compression) {
-            (Format::Vcf, None) => {
+        let mut rdr: Reader<R> = match (format, compression, csi) {
+            (Format::Vcf, None, _) => {
                 let mut reader = vcf::Reader::new(reader);
                 let header = reader.read_header()?;
-                Reader::new(XCF::Vcf(reader), header)
+                Reader::new(XCF::Vcf(Box::new(reader)), header)
             }
-            (Format::Vcf, Some(Compression::Bgzf)) => {
+            (Format::Vcf, Some(Compression::Bgzf), Some(csi)) => {
                 let mut bgzf_reader = bgzf::Reader::new(reader);
-                if let Some(csi) = csi {
-                    let mut reader = IndexedReader::new(bgzf_reader, csi);
-                    let header = reader.read_header()?;
-                    Reader::new(XCF::IndexedVcf(reader), header)
-                } else {
-                    let mut reader = vcf::Reader::new(bgzf_reader);
-                    let header = reader.read_header()?;
-                    Reader::new(XCF::CompressedVcf(reader), header)
-                }
-            }
-            (Format::Bcf, None) => {
-                let mut reader = bcf::Reader::from(reader);
+                let mut reader = IndexedReader::new(bgzf_reader, csi);
                 let header = reader.read_header()?;
-                Reader::new(XCF::Bcf(reader), header)
+                Reader::new(XCF::IndexedVcf(reader), header)
             }
-            (Format::Bcf, Some(Compression::Bgzf)) => {
-                if let Some(csi) = csi {
-                    let mut reader = bcf::IndexedReader::new(reader, csi);
-                    let header = reader.read_header()?;
-                    Reader::new(XCF::IndexedBcf(reader), header)
-                } else {
-                    let mut bgzf_reader = bgzf::Reader::new(reader);
-                    let mut reader = bcf::Reader::from(bgzf_reader);
-                    let header = reader.read_header()?;
-                    Reader::new(XCF::CompressedBcf(reader), header)
-                }
-            }
+            _ => unimplemented!(),
         };
         Ok(rdr)
     }
@@ -91,11 +69,8 @@ impl Reader {
         }
         match &mut self.inner {
             XCF::Vcf(reader) => reader.read_record(header, v),
-            XCF::Bcf(reader) => reader.read_record(header, v),
             XCF::IndexedVcf(reader) => reader.read_record(header, v),
             XCF::IndexedBcf(reader) => reader.read_record(header, v),
-            XCF::CompressedBcf(reader) => reader.read_record(header, v),
-            XCF::CompressedVcf(reader) => reader.read_record(header, v),
         }
     }
 
@@ -109,69 +84,6 @@ fn chrom_equals(c: &Chromosome, name: &str) -> bool {
     match c {
         Chromosome::Name(n) => n == name,
         Chromosome::Symbol(_) => false,
-    }
-}
-
-fn advance_reader(r: &mut Reader, header: &vcf::Header, region: &Region) -> io::Result<()>
-where
-    R: BufRead,
-{
-    let one = Position::try_from(1).unwrap();
-    let start =
-        vcf::record::Position::try_from(usize::from(region.interval().start().unwrap_or(one)))
-            .unwrap();
-    let mut v = vcf::Record::default();
-    r.variant = None;
-    loop {
-        let result = match &mut r.inner {
-            XCF::Vcf(reader) => reader.read_record(header, &mut v),
-            XCF::Bcf(reader) => reader.read_record(header, &mut v),
-            _ => unimplemented!(),
-        };
-        match result {
-            Ok(0) => return Ok(()),
-            Ok(_) => {
-                if chrom_equals(v.chromosome(), region.name()) && v.position() >= start {
-                    r.variant = Some(v);
-                    return Ok(());
-                }
-            }
-            Err(e) => return Err(e),
-        };
-    }
-}
-
-impl Reader {
-    // skip_to simply sets the file pointer to the start of region.
-    // internally, it consumes the first variant, but that will be returned on the
-    // first call to read_record.
-    pub fn skip_to(&mut self, header: &vcf::Header, region: &Region) -> io::Result<()> {
-        match &mut self.inner {
-            XCF::Vcf(_) => advance_reader(self, header, region),
-            XCF::Bcf(_) => advance_reader(self, header, region),
-            XCF::IndexedVcf(reader) => match reader.query(header, region) {
-                Ok(mut r) => {
-                    self.variant = match r.next() {
-                        Some(Ok(v)) => Some(v),
-                        Some(Err(e)) => return Err(e),
-                        None => None,
-                    };
-                    Ok(())
-                }
-                Err(e) => Err(e),
-            },
-            XCF::IndexedBcf(reader) => match reader.query(header, region) {
-                Ok(mut r) => {
-                    self.variant = match r.next() {
-                        Some(Ok(v)) => Some(v),
-                        Some(Err(e)) => return Err(e),
-                        None => None,
-                    };
-                    Ok(())
-                }
-                Err(e) => Err(e),
-            },
-        }
     }
 }
 
