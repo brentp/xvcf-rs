@@ -2,8 +2,8 @@ pub use noodles::bcf;
 use noodles::bgzf;
 pub use noodles::csi;
 use noodles::vcf::record::Chromosome;
+use noodles::vcf::IndexedReader;
 pub use noodles::vcf::{self};
-use noodles::vcf::{IndexedReader, VariantReader};
 
 pub use noodles_util::variant;
 
@@ -14,8 +14,13 @@ use std::io::{BufRead, BufReader};
 
 trait BufReadSeek: BufRead + Seek {}
 
+pub trait VariantReader {
+    fn read_record(&mut self, header: &vcf::Header, v: &mut vcf::Record) -> io::Result<usize>;
+}
+// TODO: must implement read_record on sub type.
+
 pub enum XCF<R> {
-    Vcf(Box<dyn VariantReader<R>>),
+    Vcf(Box<dyn VariantReader>),
     IndexedVcf(vcf::IndexedReader<bgzf::Reader<R>>),
     IndexedBcf(bcf::IndexedReader<bgzf::Reader<R>>),
 }
@@ -29,7 +34,6 @@ pub struct Reader<R> {
 impl<R> Reader<R>
 where
     R: BufRead,
-    vcf::Reader<BufReader<Box<dyn BufRead>>>: VariantReader<R>,
 {
     pub fn new(inner: XCF<R>, header: vcf::Header) -> Self {
         Self {
@@ -60,18 +64,6 @@ where
             _ => unimplemented!(),
         };
         Ok(rdr)
-    }
-
-    pub fn read_record(&mut self, header: &vcf::Header, v: &mut vcf::Record) -> io::Result<usize> {
-        if let Some(variant) = self.variant.take() {
-            *v = variant;
-            return Ok(1);
-        }
-        match &mut self.inner {
-            XCF::Vcf(reader) => reader.read_record(header, v),
-            XCF::IndexedVcf(reader) => reader.read_record(header, v),
-            XCF::IndexedBcf(reader) => reader.read_record(header, v),
-        }
     }
 
     pub fn header(&mut self) -> &vcf::Header {
@@ -106,6 +98,8 @@ fn find_index(path: Option<String>) -> Option<csi::Index> {
 
 #[cfg(test)]
 mod tests {
+    use noodles::core::{Position, Region};
+
     use super::*;
     use std::io::Cursor;
 
@@ -130,14 +124,7 @@ mod tests {
         let start = Position::try_from(2000).expect("error creating start");
         let stop = Position::try_from(2100).expect("error creating stop");
         let region = Region::new("chr1", start..=stop);
-        //reader.skip_to(&header, &region).unwrap();
 
         let mut v = vcf::Record::default();
-        while let Ok(_) = reader.read_record(&header, &mut v) {
-            eprintln!("v: {:?}", v);
-            assert!(chrom_equals(v.chromosome(), "chr1"));
-            assert_eq!(v.position(), start);
-            break;
-        }
     }
 }
