@@ -15,13 +15,21 @@ use std::io::{BufRead, BufReader};
 trait BufReadSeek: BufRead + Seek {}
 
 pub trait VariantReader {
-    fn read_record(&mut self, header: &vcf::Header, v: &mut vcf::Record) -> io::Result<usize>;
+    fn next_record(&mut self, header: &vcf::Header, v: &mut vcf::Record) -> io::Result<usize>;
 }
-// TODO: must implement read_record on sub type.
+
+impl<R> VariantReader for vcf::Reader<R>
+where
+    R: BufRead,
+{
+    fn next_record(&mut self, header: &vcf::Header, v: &mut vcf::Record) -> io::Result<usize> {
+        self.read_record(header, v)
+    }
+}
 
 pub enum XCF<R> {
     Vcf(Box<dyn VariantReader>),
-    IndexedVcf(vcf::IndexedReader<bgzf::Reader<R>>),
+    IndexedVcf(vcf::IndexedReader<noodles::bgzf::Reader<BufReader<Box<dyn BufRead>>>>),
     IndexedBcf(bcf::IndexedReader<bgzf::Reader<R>>),
 }
 
@@ -49,21 +57,20 @@ where
         let format = detect::detect_format(&mut reader, compression)?;
         let csi = find_index(path);
 
-        let mut rdr: Reader<R> = match (format, compression, csi) {
+        Ok(match (format, compression, csi) {
             (Format::Vcf, None, _) => {
                 let mut reader = vcf::Reader::new(reader);
                 let header = reader.read_header()?;
                 Reader::new(XCF::Vcf(Box::new(reader)), header)
             }
             (Format::Vcf, Some(Compression::Bgzf), Some(csi)) => {
-                let mut bgzf_reader = bgzf::Reader::new(reader);
+                let bgzf_reader = bgzf::Reader::new(reader);
                 let mut reader = IndexedReader::new(bgzf_reader, csi);
                 let header = reader.read_header()?;
                 Reader::new(XCF::IndexedVcf(reader), header)
             }
             _ => unimplemented!(),
-        };
-        Ok(rdr)
+        })
     }
 
     pub fn header(&mut self) -> &vcf::Header {
