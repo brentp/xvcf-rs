@@ -13,17 +13,13 @@ use detect::{Compression, Format};
 use std::io::{self, Seek};
 use std::io::{BufRead, BufReader};
 
+trait BufReadSeek: BufRead + Seek {}
+
 pub enum XCF {
-    /*
     Vcf(vcf::Reader<BufReader<Box<dyn BufRead>>>),
     Bcf(bcf::Reader<BufReader<Box<dyn BufRead>>>),
-    IndexedVcf(vcf::indexed_reader::IndexedReader<BufReader<Box<dyn BufRead>>>),
-    IndexedBcf(bcf::indexed_reader::IndexedReader<BufReader<Box<dyn BufRead>>>),
-    */
-    Vcf(vcf::Reader<BufReader<Box<dyn BufRead>>>),
-    Bcf(bcf::Reader<BufReader<Box<dyn BufRead>>>),
-    IndexedVcf(vcf::indexed_reader::IndexedReader<bgzf::Reader<BufReader<Box<dyn BufRead>>>>),
-    IndexedBcf(bcf::indexed_reader::IndexedReader<bgzf::Reader<BufReader<Box<dyn BufRead>>>>),
+    IndexedVcf(vcf::indexed_reader::IndexedReader<bgzf::Reader<BufReader<Box<dyn BufReadSeek>>>>),
+    IndexedBcf(bcf::indexed_reader::IndexedReader<bgzf::Reader<BufReader<Box<dyn BufReadSeek>>>>),
     CompressedBcf(bcf::Reader<bgzf::Reader<BufReader<Box<dyn BufRead>>>>),
     CompressedVcf(vcf::Reader<bgzf::Reader<BufReader<Box<dyn BufRead>>>>),
 }
@@ -56,7 +52,7 @@ impl Reader {
                 Reader::new(XCF::Vcf(reader), header)
             }
             (Format::Vcf, Some(Compression::Bgzf)) => {
-                let mut bgzf_reader = noodles::bgzf::Reader::new(reader);
+                let mut bgzf_reader = bgzf::Reader::new(reader);
                 if let Some(csi) = csi {
                     let mut reader = IndexedReader::new(bgzf_reader, csi);
                     let header = reader.read_header()?;
@@ -78,7 +74,7 @@ impl Reader {
                     let header = reader.read_header()?;
                     Reader::new(XCF::IndexedBcf(reader), header)
                 } else {
-                    let mut bgzf_reader = noodles::bgzf::Reader::new(reader);
+                    let mut bgzf_reader = bgzf::Reader::new(reader);
                     let mut reader = bcf::Reader::from(bgzf_reader);
                     let header = reader.read_header()?;
                     Reader::new(XCF::CompressedBcf(reader), header)
@@ -108,7 +104,6 @@ impl Reader {
     }
 }
 
-/*
 #[inline]
 fn chrom_equals(c: &Chromosome, name: &str) -> bool {
     match c {
@@ -146,10 +141,7 @@ where
     }
 }
 
-impl<R> Reader<R>
-where
-    R: BufRead + Seek,
-{
+impl Reader {
     // skip_to simply sets the file pointer to the start of region.
     // internally, it consumes the first variant, but that will be returned on the
     // first call to read_record.
@@ -182,7 +174,6 @@ where
         }
     }
 }
-*/
 
 fn find_index(path: Option<String>) -> Option<csi::Index> {
     if let Some(path) = path {
