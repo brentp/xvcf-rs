@@ -1,18 +1,15 @@
 pub use noodles::bcf;
 use noodles::bgzf;
 pub use noodles::csi;
+pub use noodles::tabix;
+use noodles::vcf;
 use noodles::vcf::record::Chromosome;
-use noodles::vcf::IndexedReader;
-pub use noodles::vcf::{self};
 
 pub use noodles_util::variant;
 
 pub mod detect;
 use detect::{Compression, Format};
-use std::io::{self, Seek};
-use std::io::{BufRead, BufReader};
-
-trait BufReadSeek: BufRead + Seek {}
+use std::io::{self, BufRead, BufReader};
 
 pub trait VariantReader {
     fn next_record(&mut self, header: &vcf::Header, v: &mut vcf::Record) -> io::Result<usize>;
@@ -26,24 +23,29 @@ where
         self.read_record(header, v)
     }
 }
-
-pub enum XCF<R> {
-    Vcf(Box<dyn VariantReader>),
-    IndexedVcf(vcf::IndexedReader<noodles::bgzf::Reader<BufReader<Box<dyn BufRead>>>>),
-    IndexedBcf(bcf::IndexedReader<bgzf::Reader<R>>),
+impl<R> VariantReader for bcf::Reader<R>
+where
+    R: BufRead,
+{
+    fn next_record(&mut self, header: &vcf::Header, v: &mut vcf::Record) -> io::Result<usize> {
+        self.read_record(header, v)
+    }
 }
 
-pub struct Reader<R> {
-    inner: XCF<R>,
+pub enum XCF {
+    Vcf(Box<dyn VariantReader>),
+    IndexedVcf(vcf::IndexedReader<BufReader<Box<dyn BufRead>>>),
+    IndexedBcf(bcf::IndexedReader<bgzf::Reader<BufReader<Box<dyn BufRead>>>>),
+}
+
+pub struct Reader {
+    inner: XCF,
     header: vcf::Header,
     variant: Option<vcf::Record>,
 }
 
-impl<R> Reader<R>
-where
-    R: BufRead,
-{
-    pub fn new(inner: XCF<R>, header: vcf::Header) -> Self {
+impl Reader {
+    pub fn new(inner: XCF, header: vcf::Header) -> Self {
         Self {
             inner,
             header,
@@ -51,11 +53,14 @@ where
         }
     }
 
-    pub fn from_reader(reader: Box<dyn BufRead>, path: Option<String>) -> io::Result<Reader<R>> {
+    pub fn from_reader(reader: Box<dyn BufRead>, path: Option<&str>) -> io::Result<Reader> {
         let mut reader = BufReader::new(reader);
+        eprintln!("detecting compression and format");
         let compression = detect::detect_compression(&mut reader)?;
+        eprintln!("detecting format");
         let format = detect::detect_format(&mut reader, compression)?;
         let csi = find_index(path);
+        eprintln!("csi: {:?}", csi);
 
         Ok(match (format, compression, csi) {
             (Format::Vcf, None, _) => {
@@ -64,10 +69,21 @@ where
                 Reader::new(XCF::Vcf(Box::new(reader)), header)
             }
             (Format::Vcf, Some(Compression::Bgzf), Some(csi)) => {
-                let bgzf_reader = bgzf::Reader::new(reader);
-                let mut reader = IndexedReader::new(bgzf_reader, csi);
+                let mut reader = vcf::IndexedReader::new(reader, csi);
                 let header = reader.read_header()?;
                 Reader::new(XCF::IndexedVcf(reader), header)
+            }
+
+            (Format::Bcf, Some(Compression::Bgzf), Some(csi)) => {
+                //let bgzf_reader = bgzf::Reader::new(reader);
+                let mut reader = bcf::IndexedReader::new(reader, csi);
+                let header = reader.read_header()?;
+                Reader::new(XCF::IndexedBcf(reader), header)
+            }
+            (Format::Bcf, _, None) => {
+                let mut reader = bcf::Reader::new(reader);
+                let header = reader.read_header()?;
+                Reader::new(XCF::Vcf(Box::new(reader)), header)
             }
             _ => unimplemented!(),
         })
@@ -86,16 +102,16 @@ fn chrom_equals(c: &Chromosome, name: &str) -> bool {
     }
 }
 
-fn find_index(path: Option<String>) -> Option<csi::Index> {
+fn find_index(path: Option<&str>) -> Option<csi::Index> {
     if let Some(path) = path {
-        let mut index_path = path.clone();
+        let mut index_path = path.clone().to_string();
         // TODO: look for csi or .tbi or use ##idx## in path.
         index_path.push_str(".csi");
         csi::read(index_path)
             .or_else(|_| {
-                let mut index_path = path.clone();
+                let mut index_path = path.clone().to_string();
                 index_path.push_str(".tbi");
-                csi::read(index_path)
+                tabix::read(index_path)
             })
             .ok()
     } else {
@@ -120,12 +136,11 @@ mod tests {
             chr2\t3000\t.\tC\tG\t.\t.\t.\n\
         ";
         let cursor = Cursor::new(vcf_data);
-        let mut rdr = BufReader::new(std::fs::File::open("tests/t.bcf").unwrap());
-        rdr.fill_buf().unwrap();
-        eprintln!("buffer: {:?}", rdr.buffer());
+        let path = "tests/t.vcf";
+        let mut rdr = BufReader::new(std::fs::File::open(&path).unwrap());
         let rdr = Box::new(rdr);
 
-        let mut reader = Reader::from_reader(rdr, None).expect("error creating new reader");
+        let mut reader = Reader::from_reader(rdr, Some(path)).expect("error creating new reader");
         let header = reader.header().clone();
 
         let start = Position::try_from(2000).expect("error creating start");
