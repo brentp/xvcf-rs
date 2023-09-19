@@ -1,3 +1,6 @@
+#![feature(specialization)]
+#![allow(incomplete_features)]
+
 pub use noodles::bcf;
 use noodles::bgzf;
 use noodles::core::Region;
@@ -117,11 +120,35 @@ where
     }
 }
 
-impl<R> Reader<R>
+trait Skip {
+    fn skip_to(&mut self, header: &vcf::Header, region: &Region) -> io::Result<()>;
+}
+
+impl<R> Skip for Reader<R>
+where
+    R: BufRead + 'static,
+{
+    default fn skip_to(&mut self, header: &vcf::Header, region: &Region) -> io::Result<()> {
+        match &mut self.inner {
+            XCF::Vcf(_) => {
+                let mut v = vcf::Record::default();
+                loop {
+                    self.next_record(header, &mut v)?;
+                    // TODO: check relative to region
+                    break;
+                }
+                Ok(())
+            }
+            _ => unimplemented!(),
+        }
+    }
+}
+
+impl<R> Skip for Reader<R>
 where
     R: BufRead + Seek + 'static,
 {
-    pub fn skip_to(&mut self, header: &vcf::Header, region: &Region) -> io::Result<()> {
+    fn skip_to(&mut self, header: &vcf::Header, region: &Region) -> io::Result<()> {
         match &mut self.inner {
             XCF::IndexedVcf(reader) => {
                 let mut q = reader.query(header, region)?;
