@@ -1,6 +1,7 @@
 #![feature(specialization)]
+#![feature(rustc_attrs)]
 #![allow(incomplete_features)]
-
+/// #![feature(min_specialization)]
 pub use noodles::bcf;
 use noodles::bgzf;
 use noodles::core::{Position, Region};
