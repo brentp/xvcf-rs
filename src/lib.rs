@@ -1,6 +1,6 @@
 #![feature(specialization)]
-#![feature(rustc_attrs)]
 #![allow(incomplete_features)]
+///#![feature(rustc_attrs)]
 /// #![feature(min_specialization)]
 pub use noodles::bcf;
 use noodles::bgzf;
@@ -199,12 +199,12 @@ pub fn chrom_equals(c: &Chromosome, name: &str) -> bool {
 
 fn find_index(path: Option<&str>) -> Option<csi::Index> {
     if let Some(path) = path {
-        let mut index_path = path.clone().to_string();
+        let mut index_path = path.to_string();
         // TODO: look for csi or .tbi or use ##idx## in path.
         index_path.push_str(".csi");
         csi::read(index_path)
             .or_else(|_| {
-                let mut index_path = path.clone().to_string();
+                let mut index_path = path.to_string();
                 index_path.push_str(".tbi");
                 tabix::read(index_path)
             })

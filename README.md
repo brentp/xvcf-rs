@@ -1,3 +1,5 @@
+[![Continuous integration](https://github.com/brentp/xvcf-rs/actions/workflows/main.yml/badge.svg)](https://github.com/brentp/xvcf-rs/actions/workflows/main.yml)
+
 This is an attempt to better understand some rust properties.
 
 We'd like to have a reader that supports vcf,vcf.gz,bcf, uncompressed bcf with both
@@ -12,8 +14,9 @@ The document indicates that :
 > Only specialization using the min_specialization feature should be used.
 > The full specialization feature is known to be unsound.
 
-But I can't get this to compile with `min_specialization`.
+But I can't get this to compile with `min_specialization`. It also seems that even `min_specialization` will
+require `nightly` for the foreseeable future.
 
 Have a look [here](https://github.com/brentp/xvcf-rs/blob/main/src/lib.rs)
 
-
+Perhaps there's completely different, and better way to do this. Let me know.
