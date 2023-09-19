@@ -10,8 +10,8 @@ pub use noodles_util::variant;
 
 pub mod detect;
 use detect::{Compression, Format};
+use std::io::Seek;
 use std::io::{self, BufRead, BufReader};
-use std::io::{Seek, SeekFrom::Current};
 
 pub trait VariantReader {
     fn next_record(&mut self, header: &vcf::Header, v: &mut vcf::Record) -> io::Result<usize>;
@@ -34,36 +34,46 @@ where
     }
 }
 
-pub trait BufReadSeek: BufRead + Seek {}
-
-pub enum XCF {
+pub enum XCF<R> {
     Vcf(Box<dyn VariantReader>),
-    IndexedVcf(vcf::IndexedReader<BufReader<Box<dyn BufReadSeek>>>),
-    IndexedBcf(bcf::IndexedReader<bgzf::Reader<BufReader<Box<dyn BufReadSeek>>>>),
+    IndexedVcf(vcf::IndexedReader<BufReader<Box<R>>>),
+    IndexedBcf(bcf::IndexedReader<bgzf::Reader<BufReader<Box<R>>>>),
 }
 
 pub struct Reader<R> {
-    inner: XCF,
+    inner: XCF<R>,
     header: vcf::Header,
     variant: Option<vcf::Record>,
-    _phantom: std::marker::PhantomData<R>,
 }
 
-impl<R> Reader<R> {
-    pub fn new(inner: XCF, header: vcf::Header) -> Self {
+impl<R> Reader<R>
+where
+    R: BufRead + 'static,
+{
+    pub fn new(inner: XCF<R>, header: vcf::Header) -> Self {
         Self {
             inner,
             header,
             variant: None,
-            _phantom: std::marker::PhantomData,
         }
     }
 
-    /// Q: how can I accept BufRead here and check if Seekable at run time?
-    pub fn from_reader(reader: Box<dyn BufReadSeek>, path: Option<&str>) -> io::Result<Reader<R>> {
+    pub fn next_record(&mut self, header: &vcf::Header, v: &mut vcf::Record) -> io::Result<usize> {
+        // if self.variant is set, then use that to set v
+        if let Some(variant) = self.variant.take() {
+            *v = variant;
+            return Ok(1);
+        }
+        match &mut self.inner {
+            XCF::Vcf(reader) => reader.next_record(header, v),
+            XCF::IndexedVcf(reader) => reader.read_record(header, v),
+            XCF::IndexedBcf(reader) => reader.read_record(header, v),
+        }
+    }
+
+    pub fn from_reader(reader: Box<R>, path: Option<&str>) -> io::Result<Reader<R>> {
         let mut reader = BufReader::new(reader);
         // this is clearly only available if the reader has type BufRead Seek.
-        let seekable = reader.seek(Current(0)).is_ok();
         eprintln!("detecting compression and format");
         let compression = detect::detect_compression(&mut reader)?;
         eprintln!("detecting format");
@@ -102,7 +112,6 @@ impl<R> Reader<R> {
             }
         })
     }
-
     pub fn header(&mut self) -> &vcf::Header {
         &self.header
     }
@@ -110,13 +119,17 @@ impl<R> Reader<R> {
 
 impl<R> Reader<R>
 where
-    R: Seek,
+    R: BufRead + Seek + 'static,
 {
     pub fn skip_to(&mut self, header: &vcf::Header, region: &Region) -> io::Result<()> {
         match &mut self.inner {
             XCF::IndexedVcf(reader) => {
-                let mut v = vcf::Record::default();
-                let q = reader.query(header, region)?;
+                let mut q = reader.query(header, region)?;
+                self.variant = match q.next() {
+                    Some(Ok(v)) => Some(v),
+                    Some(Err(e)) => return Err(e),
+                    None => None,
+                };
                 Ok(())
             }
             _ => unimplemented!(),
@@ -125,7 +138,7 @@ where
 }
 
 #[inline]
-fn chrom_equals(c: &Chromosome, name: &str) -> bool {
+pub fn chrom_equals(c: &Chromosome, name: &str) -> bool {
     match c {
         Chromosome::Name(n) => n == name,
         Chromosome::Symbol(_) => false,
@@ -165,9 +178,9 @@ mod tests {
             chr1\t2000\t.\tG\tT\t.\t.\t.\n\
             chr2\t3000\t.\tC\tG\t.\t.\t.\n\
         ";
-        let cursor = Cursor::new(vcf_data);
-        let path = "tests/t.vcf";
-        let mut rdr = BufReader::new(std::fs::File::open(&path).unwrap());
+        let _cursor = Cursor::new(vcf_data);
+        let path = "tests/t.vcf.gz";
+        let rdr = BufReader::new(std::fs::File::open(&path).unwrap());
         let rdr = Box::new(rdr);
 
         let mut reader = Reader::from_reader(rdr, Some(path)).expect("error creating new reader");
@@ -177,6 +190,15 @@ mod tests {
         let stop = Position::try_from(2100).expect("error creating stop");
         let region = Region::new("chr1", start..=stop);
 
+        reader
+            .skip_to(&header, &region)
+            .expect("error skipping to region");
+
         let mut v = vcf::Record::default();
+
+        reader
+            .next_record(&header, &mut v)
+            .expect("error reading record");
+        eprintln!("v: {}", v);
     }
 }
