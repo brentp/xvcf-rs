@@ -1,5 +1,6 @@
 pub use noodles::bcf;
 use noodles::bgzf;
+use noodles::core::Region;
 pub use noodles::csi;
 pub use noodles::tabix;
 use noodles::vcf;
@@ -10,6 +11,7 @@ pub use noodles_util::variant;
 pub mod detect;
 use detect::{Compression, Format};
 use std::io::{self, BufRead, BufReader};
+use std::io::{Seek, SeekFrom::Current};
 
 pub trait VariantReader {
     fn next_record(&mut self, header: &vcf::Header, v: &mut vcf::Record) -> io::Result<usize>;
@@ -32,29 +34,36 @@ where
     }
 }
 
+pub trait BufReadSeek: BufRead + Seek {}
+
 pub enum XCF {
     Vcf(Box<dyn VariantReader>),
-    IndexedVcf(vcf::IndexedReader<BufReader<Box<dyn BufRead>>>),
-    IndexedBcf(bcf::IndexedReader<bgzf::Reader<BufReader<Box<dyn BufRead>>>>),
+    IndexedVcf(vcf::IndexedReader<BufReader<Box<dyn BufReadSeek>>>),
+    IndexedBcf(bcf::IndexedReader<bgzf::Reader<BufReader<Box<dyn BufReadSeek>>>>),
 }
 
-pub struct Reader {
+pub struct Reader<R> {
     inner: XCF,
     header: vcf::Header,
     variant: Option<vcf::Record>,
+    _phantom: std::marker::PhantomData<R>,
 }
 
-impl Reader {
+impl<R> Reader<R> {
     pub fn new(inner: XCF, header: vcf::Header) -> Self {
         Self {
             inner,
             header,
             variant: None,
+            _phantom: std::marker::PhantomData,
         }
     }
 
-    pub fn from_reader(reader: Box<dyn BufRead>, path: Option<&str>) -> io::Result<Reader> {
+    /// Q: how can I accept BufRead here and check if Seekable at run time?
+    pub fn from_reader(reader: Box<dyn BufReadSeek>, path: Option<&str>) -> io::Result<Reader<R>> {
         let mut reader = BufReader::new(reader);
+        // this is clearly only available if the reader has type BufRead Seek.
+        let seekable = reader.seek(Current(0)).is_ok();
         eprintln!("detecting compression and format");
         let compression = detect::detect_compression(&mut reader)?;
         eprintln!("detecting format");
@@ -62,7 +71,7 @@ impl Reader {
         let csi = find_index(path);
         eprintln!("csi: {:?}", csi);
 
-        Ok(match (format, compression, csi) {
+        Ok(match (format, compression, csi /*, seekable */) {
             (Format::Vcf, None, _) => {
                 let mut reader = vcf::Reader::new(reader);
                 let header = reader.read_header()?;
@@ -96,6 +105,22 @@ impl Reader {
 
     pub fn header(&mut self) -> &vcf::Header {
         &self.header
+    }
+}
+
+impl<R> Reader<R>
+where
+    R: Seek,
+{
+    pub fn skip_to(&mut self, header: &vcf::Header, region: &Region) -> io::Result<()> {
+        match &mut self.inner {
+            XCF::IndexedVcf(reader) => {
+                let mut v = vcf::Record::default();
+                let q = reader.query(header, region)?;
+                Ok(())
+            }
+            _ => unimplemented!(),
+        }
     }
 }
 
