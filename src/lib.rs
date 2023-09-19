@@ -73,6 +73,12 @@ impl Reader {
                 let header = reader.read_header()?;
                 Reader::new(XCF::IndexedVcf(reader), header)
             }
+            (Format::Vcf, Some(Compression::Bgzf), None) => {
+                let bgzf_reader = bgzf::Reader::new(reader);
+                let mut reader = vcf::Reader::new(bgzf_reader);
+                let header = reader.read_header()?;
+                Reader::new(XCF::Vcf(Box::new(reader)), header)
+            }
 
             (Format::Bcf, Some(Compression::Bgzf), Some(csi)) => {
                 //let bgzf_reader = bgzf::Reader::new(reader);
@@ -80,12 +86,11 @@ impl Reader {
                 let header = reader.read_header()?;
                 Reader::new(XCF::IndexedBcf(reader), header)
             }
-            (Format::Bcf, _, None) => {
+            (Format::Bcf, _, _) => {
                 let mut reader = bcf::Reader::new(reader);
                 let header = reader.read_header()?;
                 Reader::new(XCF::Vcf(Box::new(reader)), header)
             }
-            _ => unimplemented!(),
         })
     }
 
