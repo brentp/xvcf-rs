@@ -3,7 +3,7 @@
 
 pub use noodles::bcf;
 use noodles::bgzf;
-use noodles::core::Region;
+use noodles::core::{Position, Region};
 pub use noodles::csi;
 pub use noodles::tabix;
 use noodles::vcf;
@@ -120,6 +120,31 @@ where
     }
 }
 
+fn simple_skip<R: BufRead + 'static>(
+    reader: &mut Reader<R>,
+    header: &vcf::Header,
+    region: &Region,
+) -> io::Result<()> {
+    let mut v = vcf::Record::default();
+    let one = Position::try_from(1).unwrap();
+    let start =
+        vcf::record::Position::try_from(usize::from(region.interval().start().unwrap_or(one)))
+            .unwrap();
+
+    loop {
+        reader.next_record(header, &mut v)?;
+        let end = match v.end() {
+            Ok(p) => p,
+            _ => vcf::record::Position::from(usize::from(v.position()) + 1),
+        };
+        if chrom_equals(v.chromosome(), region.name()) && end >= start {
+            reader.variant = Some(v);
+            break;
+        }
+    }
+    Ok(())
+}
+
 trait Skip {
     fn skip_to(&mut self, header: &vcf::Header, region: &Region) -> io::Result<()>;
 }
@@ -129,18 +154,7 @@ where
     R: BufRead + 'static,
 {
     default fn skip_to(&mut self, header: &vcf::Header, region: &Region) -> io::Result<()> {
-        match &mut self.inner {
-            XCF::Vcf(_) => {
-                let mut v = vcf::Record::default();
-                loop {
-                    self.next_record(header, &mut v)?;
-                    // TODO: check relative to region
-                    break;
-                }
-                Ok(())
-            }
-            _ => unimplemented!(),
-        }
+        simple_skip(self, header, region)
     }
 }
 
@@ -159,7 +173,17 @@ where
                 };
                 Ok(())
             }
-            _ => unimplemented!(),
+            XCF::IndexedBcf(reader) => {
+                let mut q = reader.query(header, region)?;
+                self.variant = match q.next() {
+                    Some(Ok(v)) => Some(v),
+                    Some(Err(e)) => return Err(e),
+                    None => None,
+                };
+                Ok(())
+            }
+
+            _ => simple_skip(self, header, region),
         }
     }
 }
@@ -206,7 +230,7 @@ mod tests {
             chr2\t3000\t.\tC\tG\t.\t.\t.\n\
         ";
         let _cursor = Cursor::new(vcf_data);
-        let path = "tests/t.vcf.gz";
+        let path = "tests/t.vcf";
         let rdr = BufReader::new(std::fs::File::open(&path).unwrap());
         let rdr = Box::new(rdr);
 
@@ -214,8 +238,7 @@ mod tests {
         let header = reader.header().clone();
 
         let start = Position::try_from(2000).expect("error creating start");
-        let stop = Position::try_from(2100).expect("error creating stop");
-        let region = Region::new("chr1", start..=stop);
+        let region = Region::new("chr1", start..);
 
         reader
             .skip_to(&header, &region)
