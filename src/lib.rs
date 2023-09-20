@@ -1,7 +1,3 @@
-#![feature(specialization)]
-#![allow(incomplete_features)]
-///#![feature(rustc_attrs)]
-/// #![feature(min_specialization)]
 pub use noodles::bcf;
 use noodles::bgzf;
 use noodles::core::{Position, Region};
@@ -14,8 +10,8 @@ pub use noodles_util::variant;
 
 pub mod detect;
 use detect::{Compression, Format};
-use std::io::Seek;
 use std::io::{self, BufRead, BufReader};
+use std::io::{Read, Seek};
 
 pub trait VariantReader {
     fn next_record(&mut self, header: &vcf::Header, v: &mut vcf::Record) -> io::Result<usize>;
@@ -52,7 +48,7 @@ pub struct Reader<R> {
 
 impl<R> Reader<R>
 where
-    R: BufRead + 'static,
+    R: Read + 'static,
 {
     pub fn new(inner: XCF<R>, header: vcf::Header) -> Self {
         Self {
@@ -77,13 +73,9 @@ where
 
     pub fn from_reader(reader: Box<R>, path: Option<&str>) -> io::Result<Reader<R>> {
         let mut reader = BufReader::new(reader);
-        // this is clearly only available if the reader has type BufRead Seek.
-        eprintln!("detecting compression and format");
         let compression = detect::detect_compression(&mut reader)?;
-        eprintln!("detecting format");
         let format = detect::detect_format(&mut reader, compression)?;
         let csi = find_index(path);
-        eprintln!("csi: {:?}", csi);
 
         Ok(match (format, compression, csi /*, seekable */) {
             (Format::Vcf, None, _) => {
@@ -121,7 +113,7 @@ where
     }
 }
 
-fn simple_skip<R: BufRead + 'static>(
+fn simple_skip<R: Read + 'static>(
     reader: &mut Reader<R>,
     header: &vcf::Header,
     region: &Region,
@@ -152,16 +144,7 @@ trait Skip {
 
 impl<R> Skip for Reader<R>
 where
-    R: BufRead + 'static,
-{
-    default fn skip_to(&mut self, header: &vcf::Header, region: &Region) -> io::Result<()> {
-        simple_skip(self, header, region)
-    }
-}
-
-impl<R> Skip for Reader<R>
-where
-    R: BufRead + Seek + 'static,
+    R: Read + Seek + 'static,
 {
     fn skip_to(&mut self, header: &vcf::Header, region: &Region) -> io::Result<()> {
         match &mut self.inner {
@@ -231,7 +214,7 @@ mod tests {
             chr2\t3000\t.\tC\tG\t.\t.\t.\n\
         ";
         let _cursor = Cursor::new(vcf_data);
-        let path = "tests/t.vcf";
+        let path = "tests/t.vcf.gz";
         let rdr = BufReader::new(std::fs::File::open(&path).unwrap());
         let rdr = Box::new(rdr);
 
@@ -250,6 +233,7 @@ mod tests {
         reader
             .next_record(&header, &mut v)
             .expect("error reading record");
+        assert_eq!(v.position(), Position::try_from(2000).unwrap());
         eprintln!("v: {}", v);
     }
 }
