@@ -124,6 +124,24 @@ fn simple_skip<R: Read + 'static>(
         vcf::record::Position::try_from(usize::from(region.interval().start().unwrap_or(one)))
             .unwrap();
 
+    let contigs = header.contigs();
+
+    let contig_i = if !contigs.is_empty() {
+        match contigs.get_index_of(region.name()) {
+            None => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!("unknown contig: {}", region.name()),
+                ))
+            }
+            Some(i) => i,
+        }
+    } else {
+        usize::MAX
+    };
+
+    let mut last_chrom: Option<Chromosome> = None;
+
     loop {
         reader.next_record(header, &mut v)?;
         let end = match v.end() {
@@ -133,6 +151,38 @@ fn simple_skip<R: Read + 'static>(
         if chrom_equals(v.chromosome(), region.name()) && end >= start {
             reader.variant = Some(v);
             break;
+        }
+
+        if contig_i == usize::MAX {
+            continue;
+        }
+        // we check that user isn't requesting a contig that is before the current one.
+        if let Some(ref ilast_chrom) = last_chrom {
+            if ilast_chrom == v.chromosome() {
+                continue;
+            }
+            match contigs.get_index_of(match v.chromosome() {
+                Chromosome::Symbol(_) => continue,
+                Chromosome::Name(n) => n.as_str(),
+            }) {
+                None => continue,
+                Some(i) => {
+                    if i > contig_i {
+                        // return an error about ordering of chromosomes
+                        return Err(io::Error::new(
+                            io::ErrorKind::InvalidInput,
+                            format!(
+                                "contig {} is out of order relative to {}",
+                                v.chromosome(),
+                                region.name()
+                            ),
+                        ));
+                    }
+                }
+            }
+            last_chrom = Some(v.chromosome().clone());
+        } else {
+            last_chrom = Some(v.chromosome().clone());
         }
     }
     Ok(())
@@ -216,7 +266,7 @@ mod tests {
         let _cursor = Cursor::new(vcf_data);
         let path = "tests/t.vcf.gz";
         let rdr = BufReader::new(std::fs::File::open(&path).unwrap());
-        let rdr = Box::new(rdr);
+        let rdr = Box::new(_cursor);
 
         let mut reader = Reader::from_reader(rdr, Some(path)).expect("error creating new reader");
         let header = reader.header().clone();
