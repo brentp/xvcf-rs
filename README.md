@@ -1,16 +1,31 @@
 [![Continuous integration](https://github.com/brentp/xvcf-rs/actions/workflows/main.yml/badge.svg)](https://github.com/brentp/xvcf-rs/actions/workflows/main.yml)
 
-This is an attempt to better understand some rust properties.
+This is a small library that attempts to allow efficient reading
+of VCF and BCF files that are either compressed or uncompressed and indexed or not.
+[noodles](https://github.com/zaleus/noodles) is used for the parsing, this unifies handling above that.
 
-We'd like to have a reader that supports vcf,vcf.gz,bcf, uncompressed bcf with both
-seekable and unseekable readers.
+Even when not indexed, it allows "skipping" via iterating until the requested region is reached.
+This is useful for [bedder-rs](https://github.com/quinlan-lab/bedder-rs) but might also be useful elsewhere.
 
-AFAICT, the way to do this is with [specialization](https://std-dev-guide.rust-lang.org/policy/specialization.html)
+The skipping will be most efficient when the files are compressed and indexed.
+
+
+## NOTES
+
+### Implementation
+
+As implemented, only compressed, indexed VCF or BCF will have the absolute highest performance.
+Others will require skipping via iterating over the file until the given region is reached.
+This assumes that any indexed file will also support `Seek`.
+
+### Specialization (abandoned)
+
+This is not used so we can avoid dependence on nightly rust.
+
+AFAICT, one way to do this is with [specialization](https://std-dev-guide.rust-lang.org/policy/specialization.html)
 
 If the file is not indexed and `Seek`able, then we just iterate over the records to skip to a given region.
 If it is `Seek`able and has an index, then we use the `query` functionality.
-
-Here is the (working) code as implemented: https://github.com/brentp/xvcf-rs/blob/e027632536b6d5f0da8d7b33578590dd2ce25de1/src/lib.rs#L149-L190
 
 The rust documentation indicates that :
 > Only specialization using the min_specialization feature should be used.
