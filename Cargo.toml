@@ -7,5 +7,6 @@ edition = "2021"
 
 [dependencies]
 flate2 = "1.0.26"
+indexmap = "2.0.0"
 noodles = {version = "0.51.0", features=['vcf', 'bcf', 'csi', 'tabix', 'bgzf', 'core']}
 noodles-util = {version = "0.22.0", features=['variant']}

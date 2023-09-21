@@ -1,9 +1,13 @@
+use indexmap::IndexMap;
 pub use noodles::bcf;
 use noodles::bgzf;
 use noodles::core::{Position, Region};
 pub use noodles::csi;
 pub use noodles::tabix;
 use noodles::vcf;
+use noodles::vcf::header::record::value::map::contig::Name;
+use noodles::vcf::header::record::value::map::Contig;
+use noodles::vcf::header::record::value::Map;
 use noodles::vcf::record::Chromosome;
 
 pub use noodles_util::variant;
@@ -113,6 +117,38 @@ where
     }
 }
 
+// if the vcf header has the correct info, we check that the contig is present and
+// the the region is not beyond the end of the contig.
+// if the header does not have this info, then we do not check the contig.
+fn check_contig(contigs: &IndexMap<Name, Map<Contig>>, region: &Region) -> io::Result<usize> {
+    let contig_i = if !contigs.is_empty() {
+        match contigs.get_index_of(region.name()) {
+            None => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!("unknown contig: {}", region.name()),
+                ))
+            }
+            Some(i) => {
+                let contig = contigs.get_index(i).unwrap().1;
+                if let Some(len) = contig.length() {
+                    if len < usize::from(region.interval().start().unwrap_or(Position::MAX)) {
+                        return Err(io::Error::new(
+                            io::ErrorKind::InvalidInput,
+                            format!("region {} is out of bounds for contig {:?}", region, contig),
+                        ));
+                    }
+                }
+
+                i
+            }
+        }
+    } else {
+        usize::MAX
+    };
+    Ok(contig_i)
+}
+
 fn simple_skip<R: Read + 'static>(
     reader: &mut Reader<R>,
     header: &vcf::Header,
@@ -125,20 +161,7 @@ fn simple_skip<R: Read + 'static>(
             .unwrap();
 
     let contigs = header.contigs();
-
-    let contig_i = if !contigs.is_empty() {
-        match contigs.get_index_of(region.name()) {
-            None => {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    format!("unknown contig: {}", region.name()),
-                ))
-            }
-            Some(i) => i,
-        }
-    } else {
-        usize::MAX
-    };
+    let contig_i = check_contig(contigs, region)?; // check that the contig is valid (if it exists)
 
     let mut last_chrom: Option<Chromosome> = None;
 
@@ -148,7 +171,8 @@ fn simple_skip<R: Read + 'static>(
             Ok(p) => p,
             _ => vcf::record::Position::from(usize::from(v.position()) + 1),
         };
-        if chrom_equals(v.chromosome(), region.name()) && end >= start {
+        // TODO: not sure about 1-based vs 0-based in noodles. might need end > start
+        if end >= start && chrom_equals(v.chromosome(), region.name()) {
             reader.variant = Some(v);
             break;
         }
@@ -158,6 +182,7 @@ fn simple_skip<R: Read + 'static>(
         }
         // we check that user isn't requesting a contig that is before the current one.
         if let Some(ref ilast_chrom) = last_chrom {
+            // if we have just seen this chromosome, then we can skip the check
             if ilast_chrom == v.chromosome() {
                 continue;
             }
