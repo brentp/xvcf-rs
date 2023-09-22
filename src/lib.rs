@@ -112,7 +112,7 @@ where
             }
         })
     }
-    pub fn header(&mut self) -> &vcf::Header {
+    pub fn header(&self) -> &vcf::Header {
         &self.header
     }
 }
@@ -291,7 +291,8 @@ mod tests {
         let _cursor = Cursor::new(vcf_data);
         let path = "tests/t.vcf.gz";
         let rdr = BufReader::new(std::fs::File::open(&path).unwrap());
-        let rdr = Box::new(_cursor);
+        let rdr = _cursor;
+        let rdr = Box::new(rdr);
 
         let mut reader = Reader::from_reader(rdr, Some(path)).expect("error creating new reader");
         let header = reader.header().clone();

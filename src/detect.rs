@@ -45,6 +45,7 @@ where
     use flate2::bufread::MultiGzDecoder;
 
     const BCF_MAGIC_NUMBER: [u8; 3] = *b"BCF";
+    const VCF_HEADER: [u8; 16] = *b"##fileformat=VCF";
 
     let src = reader.fill_buf()?;
 
@@ -57,12 +58,32 @@ where
             if buf == BCF_MAGIC_NUMBER {
                 return Ok(Format::Bcf);
             }
+            // check that the file is a VCF file. should start with ##fileformat=VCF
+            let mut buf = [0; VCF_HEADER.len()];
+            decoder.read_exact(&mut buf)?;
+            if buf == VCF_HEADER {
+                return Ok(Format::Vcf);
+            }
+            // return error about unknown format
+            return Err(io::Error::new(io::ErrorKind::InvalidData, "unknown format"));
         }
+        // return error about compression not supported
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "unsupported compression",
+        ));
     } else if let Some(buf) = src.get(..BCF_MAGIC_NUMBER.len()) {
         if buf == BCF_MAGIC_NUMBER {
             return Ok(Format::Bcf);
         }
     }
+    // check for vcf format
+    if let Some(buf) = src.get(..VCF_HEADER.len()) {
+        if buf == VCF_HEADER {
+            return Ok(Format::Vcf);
+        }
+    }
 
-    Ok(Format::Vcf)
+    // unknown format
+    Err(io::Error::new(io::ErrorKind::InvalidData, "unknown format"))
 }
