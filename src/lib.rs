@@ -17,13 +17,13 @@ use detect::{Compression, Format};
 use std::io::{self, BufRead, BufReader};
 use std::io::{Read, Seek};
 
-pub trait VariantReader {
+pub trait VariantReader: Send {
     fn next_record(&mut self, header: &vcf::Header, v: &mut vcf::Record) -> io::Result<usize>;
 }
 
 impl<R> VariantReader for vcf::Reader<R>
 where
-    R: BufRead,
+    R: BufRead + Send,
 {
     fn next_record(&mut self, header: &vcf::Header, v: &mut vcf::Record) -> io::Result<usize> {
         self.read_record(header, v)
@@ -31,14 +31,15 @@ where
 }
 impl<R> VariantReader for bcf::Reader<R>
 where
-    R: BufRead,
+    R: BufRead + Send,
 {
     fn next_record(&mut self, header: &vcf::Header, v: &mut vcf::Record) -> io::Result<usize> {
         self.read_record(header, v)
     }
 }
 
-pub trait ReadSeek: Read + Seek + 'static {}
+pub trait ReadSeek: Read + Seek + 'static + Send {}
+pub trait ReadSend: Read + Send {}
 
 pub enum XCF {
     Vcf(Box<dyn VariantReader>),
@@ -101,7 +102,10 @@ impl Reader {
         }
     }
 
-    pub fn from_reader(reader: Box<dyn Read>, path: Option<&str>) -> io::Result<Reader> {
+    pub fn from_reader<R: Read + Send + 'static>(
+        reader: R,
+        path: Option<&str>,
+    ) -> io::Result<Reader> {
         let mut reader = BufReader::new(reader);
         let compression = detect::detect_compression(&mut reader)?;
         let format = detect::detect_format(&mut reader, compression)?;
@@ -297,9 +301,9 @@ mod tests {
         ";
         let _cursor = Cursor::new(vcf_data);
         let path = "tests/t.vcf.gz";
-        let rdr = BufReader::new(std::fs::File::open(&path).unwrap());
-        let rdr = _cursor;
-        let rdr = Box::new(rdr);
+        let rdr = std::fs::File::open(&path).unwrap();
+        //let rdr = _cursor;
+        let rdr = Box::new(rdr) as Box<dyn Read + Send + 'static>;
 
         let mut reader = Reader::from_reader(rdr, Some(path)).expect("error creating new reader");
         let header = reader.header().clone();
