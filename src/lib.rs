@@ -46,6 +46,8 @@ pub enum XCF {
     IndexedBcf(bcf::IndexedReader<bgzf::Reader<BufReader<Box<dyn ReadSeek>>>>),
 }
 
+unsafe impl Send for XCF {}
+
 pub struct Reader {
     inner: XCF,
     header: vcf::Header,
