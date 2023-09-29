@@ -104,6 +104,13 @@ impl Reader {
         }
     }
 
+    pub fn from_path(path: &str) -> io::Result<Reader> {
+        let reader = std::fs::File::open(path)?;
+        let reader = Box::new(reader);
+        // TODO: check error from seekreader first.
+        Self::from_reader(reader, Some(path))
+    }
+
     pub fn from_reader<R: Read + Send + 'static>(
         reader: R,
         path: Option<&str>,
