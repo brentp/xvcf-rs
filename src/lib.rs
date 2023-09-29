@@ -55,6 +55,8 @@ pub struct Reader {
     variant: Option<vcf::Record>,
 }
 
+unsafe impl Send for Reader {}
+
 impl Reader {
     pub fn new(inner: XCF, header: vcf::Header) -> Self {
         Self {
