@@ -38,23 +38,22 @@ where
     }
 }
 
-pub enum XCF<R> {
+pub trait ReadSeek: Read + Seek + 'static {}
+
+pub enum XCF {
     Vcf(Box<dyn VariantReader>),
-    IndexedVcf(vcf::IndexedReader<BufReader<Box<R>>>),
-    IndexedBcf(bcf::IndexedReader<bgzf::Reader<BufReader<Box<R>>>>),
+    IndexedVcf(vcf::IndexedReader<BufReader<Box<dyn ReadSeek>>>),
+    IndexedBcf(bcf::IndexedReader<bgzf::Reader<BufReader<Box<dyn ReadSeek>>>>),
 }
 
-pub struct Reader<R> {
-    inner: XCF<R>,
+pub struct Reader {
+    inner: XCF,
     header: vcf::Header,
     variant: Option<vcf::Record>,
 }
 
-impl<R> Reader<R>
-where
-    R: Read + 'static,
-{
-    pub fn new(inner: XCF<R>, header: vcf::Header) -> Self {
+impl Reader {
+    pub fn new(inner: XCF, header: vcf::Header) -> Self {
         Self {
             inner,
             header,
@@ -75,7 +74,32 @@ where
         }
     }
 
-    pub fn from_reader(reader: Box<R>, path: Option<&str>) -> io::Result<Reader<R>> {
+    pub fn from_seek_reader(reader: Box<dyn ReadSeek>, path: Option<&str>) -> io::Result<Reader> {
+        let mut breader = BufReader::new(reader);
+        let compression = detect::detect_compression(&mut breader)?;
+        let format = detect::detect_format(&mut breader, compression)?;
+        let csi = find_index(path);
+        match (format, compression, csi /*, seekable */) {
+            (Format::Bcf, Some(Compression::Bgzf), Some(csi)) => {
+                //let bgzf_reader = bgzf::Reader::new(reader);
+                let mut reader = bcf::IndexedReader::new(breader, csi);
+                let header = reader.read_header()?;
+                Ok(Reader::new(XCF::IndexedBcf(reader), header))
+            }
+            (Format::Vcf, Some(Compression::Bgzf), Some(csi)) => {
+                //let bgzf_reader = bgzf::Reader::new(reader);
+                let mut reader = vcf::IndexedReader::new(breader, csi);
+                let header = reader.read_header()?;
+                Ok(Reader::new(XCF::IndexedVcf(reader), header))
+            }
+            _ => Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "unsupported format or lack of index",
+            )),
+        }
+    }
+
+    pub fn from_reader(reader: Box<dyn Read>, path: Option<&str>) -> io::Result<Reader> {
         let mut reader = BufReader::new(reader);
         let compression = detect::detect_compression(&mut reader)?;
         let format = detect::detect_format(&mut reader, compression)?;
@@ -87,23 +111,11 @@ where
                 let header = reader.read_header()?;
                 Reader::new(XCF::Vcf(Box::new(reader)), header)
             }
-            (Format::Vcf, Some(Compression::Bgzf), Some(csi)) => {
-                let mut reader = vcf::IndexedReader::new(reader, csi);
-                let header = reader.read_header()?;
-                Reader::new(XCF::IndexedVcf(reader), header)
-            }
-            (Format::Vcf, Some(Compression::Bgzf), None) => {
+            (Format::Vcf, Some(Compression::Bgzf), _) => {
                 let bgzf_reader = bgzf::Reader::new(reader);
                 let mut reader = vcf::Reader::new(bgzf_reader);
                 let header = reader.read_header()?;
                 Reader::new(XCF::Vcf(Box::new(reader)), header)
-            }
-
-            (Format::Bcf, Some(Compression::Bgzf), Some(csi)) => {
-                //let bgzf_reader = bgzf::Reader::new(reader);
-                let mut reader = bcf::IndexedReader::new(reader, csi);
-                let header = reader.read_header()?;
-                Reader::new(XCF::IndexedBcf(reader), header)
             }
             (Format::Bcf, _, _) => {
                 let mut reader = bcf::Reader::new(reader);
@@ -149,11 +161,7 @@ fn check_contig(contigs: &IndexMap<Name, Map<Contig>>, region: &Region) -> io::R
     Ok(contig_i)
 }
 
-fn simple_skip<R: Read + 'static>(
-    reader: &mut Reader<R>,
-    header: &vcf::Header,
-    region: &Region,
-) -> io::Result<()> {
+fn simple_skip(reader: &mut Reader, header: &vcf::Header, region: &Region) -> io::Result<()> {
     let mut v = vcf::Record::default();
     let one = Position::try_from(1).unwrap();
     let start =
@@ -217,10 +225,7 @@ trait Skip {
     fn skip_to(&mut self, header: &vcf::Header, region: &Region) -> io::Result<()>;
 }
 
-impl<R> Skip for Reader<R>
-where
-    R: Read + Seek + 'static,
-{
+impl Skip for Reader {
     fn skip_to(&mut self, header: &vcf::Header, region: &Region) -> io::Result<()> {
         match &mut self.inner {
             XCF::IndexedVcf(reader) => {
