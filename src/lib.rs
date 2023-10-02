@@ -61,6 +61,10 @@ where
             variant: None,
         }
     }
+    
+    pub fn take(&mut self) -> Option<vcf::Record> {
+        self.variant.take()
+    }
 
     pub fn next_record(&mut self, header: &vcf::Header, v: &mut vcf::Record) -> io::Result<usize> {
         // if self.variant is set, then use that to set v
