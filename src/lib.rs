@@ -213,7 +213,7 @@ fn simple_skip<R: Read + 'static>(
     Ok(())
 }
 
-trait Skip {
+pub trait Skip {
     fn skip_to(&mut self, header: &vcf::Header, region: &Region) -> io::Result<()>;
 }
 
