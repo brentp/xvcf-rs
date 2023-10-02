@@ -58,11 +58,14 @@ where
             if buf == BCF_MAGIC_NUMBER {
                 return Ok(Format::Bcf);
             }
+
             // check that the file is a VCF file. should start with ##fileformat=VCF
-            let mut buf = [0; VCF_HEADER.len()];
-            decoder.read_exact(&mut buf)?;
-            if buf == VCF_HEADER {
-                return Ok(Format::Vcf);
+            if buf == VCF_HEADER[0..buf.len()] {
+                let mut buf2 = [0; VCF_HEADER.len() - BCF_MAGIC_NUMBER.len()];
+                decoder.read_exact(&mut buf2)?;
+                if buf2 == VCF_HEADER[buf.len()..] {
+                    return Ok(Format::Vcf);
+                }
             }
             // return error about unknown format
             return Err(io::Error::new(io::ErrorKind::InvalidData, "unknown format"));
