@@ -8,7 +8,7 @@ edition = "2021"
 [dependencies]
 flate2 = "1.0.26"
 indexmap = "2.0.0"
-noodles = { version = "0.52.0", features = [
+noodles = { version = "0.83.0", features = [
     'vcf',
     'bcf',
     'csi',
@@ -16,4 +16,4 @@ noodles = { version = "0.52.0", features = [
     'bgzf',
     'core',
 ] }
-noodles-util = { version = "0.23.0", features = ['variant'] }
+noodles-util = { version = "0.53.1", features = ['variant'] }

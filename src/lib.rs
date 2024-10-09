@@ -5,15 +5,12 @@ use noodles::core::{Position, Region};
 pub use noodles::csi;
 pub use noodles::tabix;
 use noodles::vcf;
-use noodles::vcf::header::record::value::map::contig::Name;
 use noodles::vcf::header::record::value::map::Contig;
 use noodles::vcf::header::record::value::Map;
-use noodles::vcf::record::Chromosome;
-
-pub use noodles_util::variant;
 
 pub mod detect;
 use detect::{Compression, Format};
+use noodles::vcf::variant::Record;
 use std::io::{self, BufRead, BufReader};
 use std::io::{Read, Seek};
 
@@ -21,27 +18,27 @@ pub trait VariantReader {
     fn next_record(&mut self, header: &vcf::Header, v: &mut vcf::Record) -> io::Result<usize>;
 }
 
-impl<R> VariantReader for vcf::Reader<R>
+impl<R> VariantReader for vcf::io::Reader<R>
 where
     R: BufRead,
 {
     fn next_record(&mut self, header: &vcf::Header, v: &mut vcf::Record) -> io::Result<usize> {
-        self.read_record(header, v)
+        self.read_record(v)
     }
 }
-impl<R> VariantReader for bcf::Reader<R>
+impl<R> VariantReader for bcf::io::Reader<R>
 where
     R: BufRead,
 {
     fn next_record(&mut self, header: &vcf::Header, v: &mut vcf::Record) -> io::Result<usize> {
-        self.read_record(header, v)
+        self.read_record(v)
     }
 }
 
 pub enum XCF<R> {
     Vcf(Box<dyn VariantReader>),
-    IndexedVcf(vcf::IndexedReader<BufReader<Box<R>>>),
-    IndexedBcf(bcf::IndexedReader<bgzf::Reader<BufReader<Box<R>>>>),
+    IndexedVcf(vcf::io::IndexedReader<bgzf::Reader<BufReader<Box<R>>>>),
+    IndexedBcf(bcf::io::IndexedReader<bgzf::Reader<BufReader<Box<R>>>>),
 }
 
 pub struct Reader<R> {
@@ -61,7 +58,7 @@ where
             variant: None,
         }
     }
-    
+
     pub fn take(&mut self) -> Option<vcf::Record> {
         self.variant.take()
     }
@@ -74,8 +71,8 @@ where
         }
         match &mut self.inner {
             XCF::Vcf(reader) => reader.next_record(header, v),
-            XCF::IndexedVcf(reader) => reader.read_record(header, v),
-            XCF::IndexedBcf(reader) => reader.read_record(header, v),
+            XCF::IndexedVcf(reader) => reader.read_record(v),
+            XCF::IndexedBcf(reader) => reader.read_record(v),
         }
     }
 
@@ -87,30 +84,30 @@ where
 
         Ok(match (format, compression, csi /*, seekable */) {
             (Format::Vcf, None, _) => {
-                let mut reader = vcf::Reader::new(reader);
+                let mut reader = vcf::io::Reader::new(reader);
                 let header = reader.read_header()?;
                 Reader::new(XCF::Vcf(Box::new(reader)), header)
             }
             (Format::Vcf, Some(Compression::Bgzf), Some(csi)) => {
-                let mut reader = vcf::IndexedReader::new(reader, csi);
+                let mut reader = vcf::io::IndexedReader::new(reader, csi);
                 let header = reader.read_header()?;
                 Reader::new(XCF::IndexedVcf(reader), header)
             }
             (Format::Vcf, Some(Compression::Bgzf), None) => {
                 let bgzf_reader = bgzf::Reader::new(reader);
-                let mut reader = vcf::Reader::new(bgzf_reader);
+                let mut reader = vcf::io::Reader::new(bgzf_reader);
                 let header = reader.read_header()?;
                 Reader::new(XCF::Vcf(Box::new(reader)), header)
             }
 
             (Format::Bcf, Some(Compression::Bgzf), Some(csi)) => {
                 //let bgzf_reader = bgzf::Reader::new(reader);
-                let mut reader = bcf::IndexedReader::new(reader, csi);
+                let mut reader = bcf::io::IndexedReader::new(reader, csi);
                 let header = reader.read_header()?;
                 Reader::new(XCF::IndexedBcf(reader), header)
             }
             (Format::Bcf, _, _) => {
-                let mut reader = bcf::Reader::new(reader);
+                let mut reader = bcf::io::Reader::new(reader);
                 let header = reader.read_header()?;
                 Reader::new(XCF::Vcf(Box::new(reader)), header)
             }
@@ -124,7 +121,7 @@ where
 // if the vcf header has the correct info, we check that the contig is present and
 // the the region is not beyond the end of the contig.
 // if the header does not have this info, then we do not check the contig.
-fn check_contig(contigs: &IndexMap<Name, Map<Contig>>, region: &Region) -> io::Result<usize> {
+fn check_contig(contigs: &IndexMap<String, Map<Contig>>, region: &Region) -> io::Result<usize> {
     let contig_i = if !contigs.is_empty() {
         match contigs.get_index_of(region.name()) {
             None => {
@@ -161,22 +158,31 @@ fn simple_skip<R: Read + 'static>(
     let mut v = vcf::Record::default();
     let one = Position::try_from(1).unwrap();
     let start =
-        vcf::record::Position::try_from(usize::from(region.interval().start().unwrap_or(one)))
+        noodles::core::Position::try_from(usize::from(region.interval().start().unwrap_or(one)))
             .unwrap();
 
     let contigs = header.contigs();
     let contig_i = check_contig(contigs, region)?; // check that the contig is valid (if it exists)
 
-    let mut last_chrom: Option<Chromosome> = None;
+    let mut last_chrom: Option<String> = None;
 
     loop {
         reader.next_record(header, &mut v)?;
-        let end = match v.end() {
+        let end = match v.variant_end(header) {
             Ok(p) => p,
-            _ => vcf::record::Position::from(usize::from(v.position()) + 1),
+            _ => {
+                let s = v
+                    .variant_start()
+                    .unwrap_or(Ok(Position::MAX))
+                    .unwrap_or(Position::MAX);
+                if s == Position::MAX {
+                    continue;
+                }
+                s.checked_add(1).unwrap_or(Position::MAX)
+            }
         };
         // TODO: not sure about 1-based vs 0-based in noodles. might need end > start
-        if end >= start && chrom_equals(v.chromosome(), region.name()) {
+        if end >= start && chrom_equals(v.reference_sequence_name(), region.name()) {
             reader.variant = Some(v);
             break;
         }
@@ -185,15 +191,12 @@ fn simple_skip<R: Read + 'static>(
             continue;
         }
         // we check that user isn't requesting a contig that is before the current one.
-        if let Some(ref ilast_chrom) = last_chrom {
+        if let Some(ilast_chrom) = &last_chrom {
             // if we have just seen this chromosome, then we can skip the check
-            if ilast_chrom == v.chromosome() {
+            if ilast_chrom == v.reference_sequence_name() {
                 continue;
             }
-            match contigs.get_index_of(match v.chromosome() {
-                Chromosome::Symbol(_) => continue,
-                Chromosome::Name(n) => n.as_str(),
-            }) {
+            match contigs.get_index_of(v.reference_sequence_name()) {
                 None => continue,
                 Some(i) => {
                     if i > contig_i {
@@ -202,16 +205,16 @@ fn simple_skip<R: Read + 'static>(
                             io::ErrorKind::InvalidInput,
                             format!(
                                 "contig {} is out of order relative to {}",
-                                v.chromosome(),
+                                v.reference_sequence_name(),
                                 region.name()
                             ),
                         ));
                     }
                 }
             }
-            last_chrom = Some(v.chromosome().clone());
+            last_chrom = Some(v.reference_sequence_name().to_string());
         } else {
-            last_chrom = Some(v.chromosome().clone());
+            last_chrom = Some(v.reference_sequence_name().to_string());
         }
     }
     Ok(())
@@ -252,11 +255,8 @@ where
 }
 
 #[inline]
-pub fn chrom_equals(c: &Chromosome, name: &str) -> bool {
-    match c {
-        Chromosome::Name(n) => n == name,
-        Chromosome::Symbol(_) => false,
-    }
+fn chrom_equals(s: &str, other: &(impl AsRef<[u8]> + ?Sized)) -> bool {
+    s.as_bytes() == other.as_ref()
 }
 
 fn find_index(path: Option<&str>) -> Option<csi::Index> {
@@ -313,7 +313,10 @@ mod tests {
         reader
             .next_record(&header, &mut v)
             .expect("error reading record");
-        assert_eq!(v.position(), Position::try_from(2000).unwrap());
-        eprintln!("v: {}", v);
+        assert_eq!(
+            v.variant_start().unwrap().unwrap(),
+            Position::try_from(2000).unwrap()
+        );
+        eprintln!("v: {:?}", v);
     }
 }
