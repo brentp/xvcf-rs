@@ -8,12 +8,4 @@ edition = "2021"
 [dependencies]
 flate2 = "1.0.26"
 indexmap = "2.0.0"
-noodles = { version = "0.83.0", features = [
-    'vcf',
-    'bcf',
-    'csi',
-    'tabix',
-    'bgzf',
-    'core',
-] }
-noodles-util = { version = "0.53.1", features = ['variant'] }
+rust-htslib = {version = "0.47.0", features=["libdeflate"]}
