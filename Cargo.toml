@@ -1,11 +1,9 @@
 [package]
 name = "xvcf"
-version = "0.1.4"
+version = "0.2.0"
 edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-flate2 = "1.0.26"
-indexmap = "2.0.0"
 rust-htslib = {version = "0.47.0", features=["libdeflate"]}

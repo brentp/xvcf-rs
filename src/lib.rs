@@ -1,5 +1,5 @@
 use rust_htslib::bcf::{self, Read};
-use std::{fmt, io, path::Path};
+use std::{io, path::Path};
 
 pub enum ReaderInner {
     Indexed(bcf::IndexedReader),
@@ -11,6 +11,14 @@ pub struct Reader<'a> {
     header: bcf::header::HeaderView,
     records: Option<bcf::Records<'a, bcf::Reader>>,
     current_record: Option<bcf::Record>,
+    last_record: TinyRecord,
+}
+
+#[derive(Clone, Debug)]
+struct TinyRecord {
+    rid: i32,
+    pos: i64,
+    stop: i64,
 }
 
 impl<'a> Reader<'a> {
@@ -24,15 +32,29 @@ impl<'a> Reader<'a> {
             header,
             records: None,
             current_record: None,
+            last_record: TinyRecord {
+                rid: -1,
+                pos: -1,
+                stop: -1,
+            },
         }
     }
 
     pub fn take(&mut self) -> Option<bcf::Record> {
-        self.current_record.take()
+        if let Some(record) = self.current_record.take() {
+            self.last_record = TinyRecord {
+                rid: record.rid().unwrap() as i32,
+                pos: record.pos(),
+                stop: record.end(),
+            };
+            Some(record)
+        } else {
+            None
+        }
     }
 
     pub fn next_record(&mut self) -> io::Result<Option<bcf::Record>> {
-        if let Some(record) = self.current_record.take() {
+        if let Some(record) = self.take() {
             return Ok(Some(record));
         }
 
@@ -60,21 +82,56 @@ impl<'a> Reader<'a> {
     }
 
     pub fn from_path<P: AsRef<Path>>(path: P) -> io::Result<Reader<'static>> {
-        // Try indexed reader first
-        match bcf::IndexedReader::from_path(&path) {
-            Ok(indexed_reader) => Ok(Reader::new(ReaderInner::Indexed(indexed_reader))),
-            Err(_) => {
-                // Fall back to plain reader
-                let reader = bcf::Reader::from_path(path)
-                    .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
-                Ok(Reader::new(ReaderInner::Plain(reader)))
+        let path = path.as_ref();
+
+        // Check for .csi or .tbi index files
+        let has_index = Path::new(&format!("{}.csi", path.display())).exists()
+            || Path::new(&format!("{}.tbi", path.display())).exists();
+
+        if has_index {
+            // Use indexed reader if index exists
+            match bcf::IndexedReader::from_path(path) {
+                Ok(indexed_reader) => Ok(Reader::new(ReaderInner::Indexed(indexed_reader))),
+                Err(e) => {
+                    // Fall back to plain reader if index exists but can't be loaded
+                    eprintln!(
+                        "Index found but failed to load: {}. Falling back to plain reader",
+                        e
+                    );
+                    let reader = bcf::Reader::from_path(path)
+                        .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+                    Ok(Reader::new(ReaderInner::Plain(reader)))
+                }
             }
+        } else {
+            // Use plain reader if no index exists
+            let reader = bcf::Reader::from_path(path)
+                .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+            Ok(Reader::new(ReaderInner::Plain(reader)))
         }
     }
 
     pub fn header(&self) -> &bcf::header::HeaderView {
         &self.header
     }
+}
+
+fn is_record_after_last(last: &TinyRecord, record: &bcf::Record) -> bool {
+    let current_rid = record.rid().unwrap();
+
+    if current_rid as i32 > last.rid {
+        return true;
+    }
+    if (current_rid as i32) < last.rid {
+        return false;
+    }
+    if record.pos() < last.pos {
+        return false;
+    }
+    if record.pos() > last.pos {
+        return true;
+    }
+    return record.end() > last.stop;
 }
 
 pub trait Skip {
@@ -106,7 +163,39 @@ impl<'a> Skip for Reader<'a> {
 
                 reader
                     .fetch(rid, pos - 1, None)
-                    .map_err(|e| io::Error::new(io::ErrorKind::Other, e))
+                    .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+
+                // Read until we find a record after the last_record
+                let mut record = reader.empty_record();
+                loop {
+                    match reader.read(&mut record) {
+                        Some(Ok(())) => {
+                            if is_record_after_last(&self.last_record, &record) {
+                                /*
+                                eprintln!(
+                                    "setting current record to: {} with last_record: {:?}",
+                                    record.pos(),
+                                    self.last_record
+                                );
+                                */
+                                self.current_record = Some(record);
+                                return Ok(());
+                            }
+                        }
+                        Some(Err(e)) => return Err(io::Error::new(io::ErrorKind::Other, e)),
+                        None => {
+                            break;
+                        }
+                    }
+                }
+                // if we got here, then we probably hit the end of a chrom. so skip to next chrom.
+                let next_rid = rid + 1;
+                let name = self.header().rid2name(next_rid);
+                if let Err(_e) = name {
+                    return Ok(());
+                }
+                let name: String = std::str::from_utf8(name.unwrap()).unwrap().to_owned() + ":1";
+                self.skip_to(&name)
             }
             ReaderInner::Plain(reader) => {
                 let target_rid = reader
@@ -115,27 +204,33 @@ impl<'a> Skip for Reader<'a> {
                     .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
 
                 // Scan through records until we find one that's >= our target position
-                match reader.records().next() {
-                    Some(Ok(record)) => {
-                        let record_rid = record.rid().unwrap();
+                // AND after our last_record
+                loop {
+                    match reader.records().next() {
+                        Some(Ok(record)) => {
+                            let record_rid = record.rid().unwrap();
 
-                        if record_rid > target_rid {
-                            // We've gone past our target chromosome
-                            self.current_record = Some(record);
-                            return Ok(());
-                        } else if record_rid == target_rid {
-                            if (record.end() as u64) >= pos {
-                                // Found a record at or after our target position
-                                self.current_record = Some(record);
+                            if record_rid > target_rid {
+                                // We've gone past our target chromosome
+                                if is_record_after_last(&self.last_record, &record) {
+                                    self.current_record = Some(record);
+                                }
                                 return Ok(());
+                            } else if record_rid == target_rid {
+                                if (record.end() as u64) >= pos
+                                    && is_record_after_last(&self.last_record, &record)
+                                {
+                                    // Found a record at or after our target position
+                                    self.current_record = Some(record);
+                                    return Ok(());
+                                }
                             }
+                            // Otherwise continue scanning
                         }
-                        // Otherwise continue scanning
+                        Some(Err(e)) => return Err(io::Error::new(io::ErrorKind::Other, e)),
+                        None => return Ok(()),
                     }
-                    Some(Err(e)) => return Err(io::Error::new(io::ErrorKind::Other, e)),
-                    None => return Ok(()),
                 }
-                Ok(()) // Reached end of file without finding matching position
             }
         }
     }
@@ -162,20 +257,19 @@ mod tests {
             assert_eq!(record.pos(), 1999); // 0-based position
             let chrom = reader.header().rid2name(record.rid().unwrap()).unwrap();
             let chrom_str = std::str::from_utf8(chrom).unwrap();
-            println!("Record: {:?}", record);
-            println!("Record: {}:{}", chrom_str, record.pos());
+            println!("first seek: {}:{}", chrom_str, record.pos());
         } else {
             panic!("No record found");
         }
 
         // now if we skip backwards we should NOT get the same record
         reader
-            .skip_to("chr1:1999")
+            .skip_to("chr1:2000")
             .expect("error skipping to region");
-        let r = reader.next_record().expect("error reading record").unwrap();
-        let chrom = reader.header().rid2name(r.rid().unwrap()).unwrap();
-        let chrom_str = std::str::from_utf8(chrom).unwrap();
-        eprintln!("Record: {}:{}", chrom_str, r.pos());
-        assert!(r.pos() != 1999);
+        let record = reader.next_record().expect("error reading record");
+        assert!(record.is_some());
+        let record = record.unwrap();
+        assert_eq!(record.pos(), 2999);
+        assert_eq!(record.rid().unwrap(), 1);
     }
 }
