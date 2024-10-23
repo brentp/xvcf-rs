@@ -131,7 +131,7 @@ fn is_record_after_last(last: &TinyRecord, record: &bcf::Record) -> bool {
     if record.pos() > last.pos {
         return true;
     }
-    return record.end() > last.stop;
+    record.end() > last.stop
 }
 
 pub trait Skip {
@@ -216,14 +216,10 @@ impl<'a> Skip for Reader<'a> {
                                     self.current_record = Some(record);
                                 }
                                 return Ok(());
-                            } else if record_rid == target_rid {
-                                if (record.end() as u64) >= pos
-                                    && is_record_after_last(&self.last_record, &record)
-                                {
-                                    // Found a record at or after our target position
-                                    self.current_record = Some(record);
-                                    return Ok(());
-                                }
+                            } else if record_rid == target_rid && (record.end() as u64) >= pos && is_record_after_last(&self.last_record, &record) {
+                                // Found a record at or after our target position
+                                self.current_record = Some(record);
+                                return Ok(());
                             }
                             // Otherwise continue scanning
                         }
