@@ -21,7 +21,7 @@ struct TinyRecord {
     stop: i64,
 }
 
-impl<'a> Reader<'a> {
+impl Reader<'_> {
     pub fn new(inner: ReaderInner) -> Self {
         let header = match &inner {
             ReaderInner::Indexed(r) => r.header().clone(),
@@ -138,7 +138,7 @@ pub trait Skip {
     fn skip_to(&mut self, region: &str) -> io::Result<()>;
 }
 
-impl<'a> Skip for Reader<'a> {
+impl Skip for Reader<'_> {
     fn skip_to(&mut self, region: &str) -> io::Result<()> {
         // Parse region string (e.g., "chr1:2000")
         let parts: Vec<&str> = region.split(':').collect();
@@ -216,7 +216,10 @@ impl<'a> Skip for Reader<'a> {
                                     self.current_record = Some(record);
                                 }
                                 return Ok(());
-                            } else if record_rid == target_rid && (record.end() as u64) >= pos && is_record_after_last(&self.last_record, &record) {
+                            } else if record_rid == target_rid
+                                && (record.end() as u64) >= pos
+                                && is_record_after_last(&self.last_record, &record)
+                            {
                                 // Found a record at or after our target position
                                 self.current_record = Some(record);
                                 return Ok(());
