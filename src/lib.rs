@@ -135,25 +135,11 @@ fn is_record_after_last(last: &TinyRecord, record: &bcf::Record) -> bool {
 }
 
 pub trait Skip {
-    fn skip_to(&mut self, region: &str) -> io::Result<()>;
+    fn skip_to(&mut self, chrom: &str, pos0: u64) -> io::Result<()>;
 }
 
 impl Skip for Reader<'_> {
-    fn skip_to(&mut self, region: &str) -> io::Result<()> {
-        // Parse region string (e.g., "chr1:2000")
-        let parts: Vec<&str> = region.split(':').collect();
-        if parts.len() != 2 {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "Invalid region format",
-            ));
-        }
-
-        let chrom = parts[0];
-        let pos: u64 = parts[1]
-            .parse()
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
-
+    fn skip_to(&mut self, chrom: &str, pos0: u64) -> io::Result<()> {
         match &mut self.inner {
             ReaderInner::Indexed(reader) => {
                 let rid = reader
@@ -162,7 +148,7 @@ impl Skip for Reader<'_> {
                     .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
 
                 reader
-                    .fetch(rid, pos - 1, None)
+                    .fetch(rid, pos0, None)
                     .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
 
                 // Read until we find a record after the last_record
@@ -194,8 +180,8 @@ impl Skip for Reader<'_> {
                 if let Err(_e) = name {
                     return Ok(());
                 }
-                let name: String = std::str::from_utf8(name.unwrap()).unwrap().to_owned() + ":1";
-                self.skip_to(&name)
+                let name = String::from_utf8(name.unwrap().to_vec()).unwrap();
+                self.skip_to(&name, 0)
             }
             ReaderInner::Plain(reader) => {
                 let target_rid = reader
@@ -217,7 +203,7 @@ impl Skip for Reader<'_> {
                                 }
                                 return Ok(());
                             } else if record_rid == target_rid
-                                && (record.end() as u64) >= pos
+                                && (record.end() as u64) >= pos0
                                 && is_record_after_last(&self.last_record, &record)
                             {
                                 // Found a record at or after our target position
@@ -247,7 +233,7 @@ mod tests {
         let _header = reader.header().clone();
 
         reader
-            .skip_to("chr1:2000")
+            .skip_to("chr1", 1999)
             .expect("error skipping to region");
 
         // Store the record result in a separate variable to end the borrow
@@ -263,7 +249,7 @@ mod tests {
 
         // now if we skip backwards we should NOT get the same record
         reader
-            .skip_to("chr1:2000")
+            .skip_to("chr1", 1999)
             .expect("error skipping to region");
         let record = reader.next_record().expect("error reading record");
         assert!(record.is_some());
