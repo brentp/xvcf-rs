@@ -1,3 +1,4 @@
+pub use rust_htslib;
 use rust_htslib::bcf::{self, Read};
 use std::{io, path::Path};
 
