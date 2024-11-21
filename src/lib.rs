@@ -1,5 +1,6 @@
 pub use rust_htslib;
 use rust_htslib::bcf::{self, Read};
+//use rust_htslib::htslib as hts;
 use std::{io, path::Path};
 
 pub enum ReaderInner {
@@ -23,6 +24,26 @@ struct TinyRecord {
 }
 
 impl Reader<'_> {
+    pub fn from_path<P: AsRef<Path>>(path: P) -> io::Result<Reader<'static>> {
+        // check if .csi or .tbi index exists
+        let has_index = Path::new(&format!("{}.csi", path.as_ref().display())).exists()
+            || Path::new(&format!("{}.tbi", path.as_ref().display())).exists();
+
+        if has_index {
+            // Use indexed reader if index exists
+            return match bcf::IndexedReader::from_path(path) {
+                Ok(indexed_reader) => Ok(Reader::new(ReaderInner::Indexed(indexed_reader))),
+                Err(e) => {
+                    return Err(io::Error::new(io::ErrorKind::Other, e));
+                }
+            };
+        }
+        // Use plain reader if no index exists
+        let reader =
+            bcf::Reader::from_path(path).map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+        Ok(Reader::new(ReaderInner::Plain(reader)))
+    }
+
     pub fn new(inner: ReaderInner) -> Self {
         let header = match &inner {
             ReaderInner::Indexed(r) => r.header().clone(),
@@ -79,36 +100,6 @@ impl Reader<'_> {
                 Some(Err(e)) => Err(io::Error::new(io::ErrorKind::Other, e)),
                 None => Ok(None),
             },
-        }
-    }
-
-    pub fn from_path<P: AsRef<Path>>(path: P) -> io::Result<Reader<'static>> {
-        let path = path.as_ref();
-
-        // Check for .csi or .tbi index files
-        let has_index = Path::new(&format!("{}.csi", path.display())).exists()
-            || Path::new(&format!("{}.tbi", path.display())).exists();
-
-        if has_index {
-            // Use indexed reader if index exists
-            match bcf::IndexedReader::from_path(path) {
-                Ok(indexed_reader) => Ok(Reader::new(ReaderInner::Indexed(indexed_reader))),
-                Err(e) => {
-                    // Fall back to plain reader if index exists but can't be loaded
-                    eprintln!(
-                        "Index found but failed to load: {}. Falling back to plain reader",
-                        e
-                    );
-                    let reader = bcf::Reader::from_path(path)
-                        .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
-                    Ok(Reader::new(ReaderInner::Plain(reader)))
-                }
-            }
-        } else {
-            // Use plain reader if no index exists
-            let reader = bcf::Reader::from_path(path)
-                .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
-            Ok(Reader::new(ReaderInner::Plain(reader)))
         }
     }
 
